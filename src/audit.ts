@@ -2,11 +2,13 @@ import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open } from "node:fs/promises";
 import path from "node:path";
 import type { DirectMethod } from "./tools.ts";
+import type { WindowsMethod } from "./windows-tools.ts";
+import { restrictWindowsDirectory } from "./private-directory.ts";
 
 export interface AuditRecord {
 	timestamp: string;
 	runId: string;
-	method: DirectMethod | "invalid_request";
+	method: DirectMethod | WindowsMethod | "invalid_request";
 	app: string | null;
 	inputBytes: number;
 	outcome: string;
@@ -29,6 +31,7 @@ async function ensurePrivateDirectory(directory: string): Promise<void> {
 	} catch (error) {
 		if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
 		await mkdir(directory, { recursive: true, mode: 0o700 });
+		await restrictWindowsDirectory(directory);
 	}
 	await chmod(directory, 0o700);
 }

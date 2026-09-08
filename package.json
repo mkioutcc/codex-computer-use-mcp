@@ -6,7 +6,8 @@
   "license": "MIT",
   "type": "module",
   "os": [
-    "darwin"
+    "darwin",
+    "win32"
   ],
   "keywords": [
     "computer-use",
@@ -34,7 +35,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "build": "node tools/build.mjs",
     "lint": "oxlint --deny-warnings",
     "check": "npm run lint && tsc -p tsconfig.json --noEmit",
     "pretest": "npm run build",

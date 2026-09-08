@@ -6,6 +6,7 @@ import type { JsonObject } from "./tools.ts";
 interface WorkerInput {
 	code: string;
 	store: JsonObject;
+	methods: string[];
 }
 
 type CallResultMessage =
@@ -83,18 +84,9 @@ const bootstrap = new vm.Script(`(() => {
 	delete globalThis.__emitImageBridge;
 	delete globalThis.__storeJson;
 	const call = async (method, args = {}) => JSON.parse(await callBridge(method, JSON.stringify(args)));
-	globalThis.sky = Object.freeze({
-		list_apps: (args) => call("list_apps", args),
-		get_app_state: (args) => call("get_app_state", args),
-		click: (args) => call("click", args),
-		perform_secondary_action: (args) => call("perform_secondary_action", args),
-		set_value: (args) => call("set_value", args),
-		select_text: (args) => call("select_text", args),
-		scroll: (args) => call("scroll", args),
-		drag: (args) => call("drag", args),
-		press_key: (args) => call("press_key", args),
-		type_text: (args) => call("type_text", args),
-	});
+	globalThis.sky = Object.freeze(Object.fromEntries(
+		${JSON.stringify(input.methods)}.map(method => [method, (args) => call(method, args)])
+	));
 	globalThis.emit = (value) => emitBridge(JSON.stringify(value));
 	globalThis.emitImage = (value) => {
 		if (value === null) throw new Error("get_app_state returned no screenshot");

@@ -1,5 +1,7 @@
 # Windows 官方 Computer Use → Pi 可行性研究
 
+> **最新狀態：已實作並驗證 Windows 官方接入。** 第 1–8 節保留研究／受阻過程；先前「尚未握手」「blocked」是當時結論，不是目前狀態。成功路徑、驗收與限制見第 9 節。
+
 查證日期：2026-09-08。第 1–6 節為官方文件、此 fork 原始碼與已安裝 Windows Codex app 的初步唯讀研究；第 7 節記錄後續獲准的啟動 PoC。未修改正式程式碼，未做桌面輸入或端到端驗收；後續僅正常啟動官方 app，獨立 runtime 啟動受阻。
 
 ## 結論
@@ -163,7 +165,7 @@ Pi computer_use({ code })
 
 - PowerShell 執行官方 `node_repl.exe --help`：`NativeCommandFailed / ApplicationFailedException`，訊息為「存取被拒」。
 - Node.js `v26.2.0` 的 `spawnSync` 對 `codex.exe`、官方 `node.exe`、`node_repl.exe` 分別執行 `--version`：全部 `error.code: EPERM`、`status: null`，沒有工具握手。
-- 唯讀 ACL 顯示 `BUILTIN\\Users Allow ReadAndExecute, Synchronize`。這不足以判定拒絕的根因；沒有證據證明是單純 ACL、帳號授權、App Control 或其他特定機制。
+- 當時格式化 ACL 顯示 `BUILTIN\\Users Allow ReadAndExecute, Synchronize`，但未顯示該 ACE 的條件；不能據此判定一般使用者具有無條件執行權限。後續原始 SDDL 與有效存取對比已定位此遺漏，見第 8 節。
 
 ### 7.2 正常套件入口也已釐清
 
@@ -242,3 +244,147 @@ cua_node/bin/node_repl.exe    EPERM status=null
 沒有使用 `--force`、跳過平台限制或把未開始的測試報成通過；沒有新增／更改測試。TDD 尚未進入實作階段，因為使用者批准的先決 PoC 未通過。本次只保留這份研究與重現紀錄，不建立額外診斷框架。
 
 **交付狀態：blocked，不是 Windows 整合完成。** 下一步需先確認此套件在一般官方 app 內的 Computer Use 能否正常使用，以及有無可供外部 Pi 使用的官方 runtime 啟動契約；如需登入或授權，必須由使用者操作。不能在這些證據不足時先改正式 API 或移除平台／官方安全限制。
+
+## 8. EPERM 因果診斷：條件式檔案執行權限（2026-09-08）
+
+本輪約 13:39–13:46 UTC 完成主要探測；重新解析到同一官方套件 `26.901.6511.0`。**已定位目前未封裝宿主直接啟動 bundled EXE 的檔案執行權限障礙；不是已證明所有 Windows 接入不可能。** 沒有修改正式 adapter，也沒有完成 runtime 握手。
+
+### 8.1 實際程序建立 red repro 與一次一變數對比
+
+先建立臨時 PowerShell `System.Diagnostics.Process.Start()` repro：三個官方 runtime 各執行 `--version`，逐檔驗證 OpenAI Valid 簽章，每個程序最多等五秒，非零退出／建立失敗／超時均使腳本 exit 1。13:40:05 UTC 起重複 baseline 均為：
+
+```text
+codex.exe        started=false  exitCode=null  Win32Exception.NativeErrorCode=5
+cua node.exe     started=false  exitCode=null  Win32Exception.NativeErrorCode=5
+node_repl.exe    started=false  exitCode=null  Win32Exception.NativeErrorCode=5
+內層 Win32Exception.HResult=0x80004005，訊息 Access is denied
+外層 PowerShell MethodInvocationException.HResult=0x80131501
+```
+
+這是 Windows 原生錯誤碼 **5 / ERROR_ACCESS_DENIED**；不能僅從 Node 的 `EPERM` 推論某一安全政策。HResult 是實際 .NET 例外值，不自行替換成 `0x80070005`。
+
+在測試前已向主管提出五個可反證假說：cwd/env/stdio 相容性、Node/libuv 建立方式、套件 bundled image 邊界、CodeIntegrity/AppLocker 拒絕事件、官方 package/session 啟動契約。結果：
+
+| 對比（其餘維持 baseline） | 實際結果／可排除範圍 |
+| --- | --- |
+| repo cwd → TEMP；另一次 → image 目錄 | 三者仍原生錯誤 5；這兩個 cwd 修正無效 |
+| 繼承 env → 僅保留 Windows 基本路徑／使用者目錄變數 | 三者仍 5；移除其他 env 無效，未輸出環境值 |
+| stdout/stderr 重導 → 繼承 | 三者仍 5；不是此重導設定造成 |
+| 在繼承 stdio 基準上只改 `UseShellExecute=false` → `true` | 三者仍 5；不是只靠 ShellExecute 即可修正 |
+| 相同 .NET 建立路徑改啟動系統 `whoami.exe /user`、`cmd.exe /d /c ver`、公開安裝 Node `--version` | 都成功、exit 0；未保留 whoami 身份輸出，Node 為 `v26.2.0`，只作控制組 |
+| 同套件非 CUA 工具 `app/resources/rg.exe --version` | 同樣 5；拒絕不只發生於 CUA runtime |
+
+基礎 PE 唯讀檢查：上述 bundled EXE 與公開 Node 均為 `MZ`、`PE`、machine `0x8664`、PE32+ `0x020B`；不是把非 Windows／不同架構檔案當成這些 EXE。此檢查不是完整 PE／DLL 完整性驗證。
+
+### 8.2 決定性新增證據：原始 SDDL 與有效執行存取
+
+套件根目錄及 `ChatGPT.exe`、`codex.exe`、CUA `node.exe`、`node_repl.exe`、`rg.exe` 的 DACL 中，Users 的執行許可是 **條件式 ACE**。以 runtime 檔案的原始 SDDL 片段為例：
+
+```text
+(XA;ID;0x1200a9;;;BU;(WIN://SYSAPPID Contains "OpenAI.Codex_2p2nqsd0c76g0"))
+(A;ID;FR;;;BU)
+```
+
+`BU` 為 Builtin Users；`0x1200a9` 包含讀取與執行，卻附有 `WIN://SYSAPPID` 套件身份條件；另一個無條件 Users ACE 只有 `FR`，不含 `FILE_EXECUTE`。**第 7.1 節原先的格式化 ACL 呈現遺失了條件，並非無條件可執行的證據。** 其他 ACE 存在，因此另外驗證目前呼叫端的有效存取，而不是只靠解讀其中一個 ACE。
+
+唯讀 `CreateFileW` 對相同檔案、相同 share/open 參數，只變更要求的存取位元；不建立映像、不執行檔案、不寫內容：
+
+| 呼叫端要求 | 四個 bundled EXE：codex／CUA Node／node_repl／rg | 公開安裝 Node |
+| --- | --- | --- |
+| `FILE_READ_DATA` (`0x1`) | 全部成功 | 成功 |
+| `FILE_EXECUTE` (`0x20`) | 全部失敗，`GetLastError()=5` | 成功 |
+
+再以唯讀 package API 查詢：
+
+- 診斷 PowerShell 的 `GetCurrentPackageFullName()`：`15700 / APPMODEL_ERROR_NO_PACKAGE`。
+- 既有官方 `ChatGPT.exe` 程序：以 `PROCESS_QUERY_LIMITED_INFORMATION` + `GetPackageFullName()` 取得 `OpenAI.Codex_26.901.6511.0_x64__2p2nqsd0c76g0`，回傳 0。沒有開啟或複製程序 token、注入、debugger 或設定任何身份。
+
+這些對比直接確認目前 caller **可讀但不能取得檔案執行存取**，與套件身份條件式 DACL 一致，已足以阻斷直接建立程序。這不是 app 帳號登入失敗的證據，也不宣稱排除了所有可能重疊的系統政策。
+
+### 8.3 事件與正常入口的邊界
+
+13:41:53 UTC 查詢前八分鐘，對每個日誌最多 300 筆，僅輸出符合上述確切 package/image 路徑的事件欄位，不輸出其他事件內容：
+
+- `CodeIntegrity/Operational`：8 筆，符合 image 者 0。
+- `AppModel-Runtime/Admin`：1 筆，符合者 0。
+- `Security-Mitigations/KernelMode`：1 筆，符合者 0。
+- AppLocker 的 `EXE and DLL`、`MSI and Script`、`Packaged app-Execution`，以及 `TWinUI/Operational`、`Security-Mitigations/UserMode`：時間窗內查無事件。
+- 沒有碰到 300 筆上限，也沒有提權／開啟日誌。**無相符事件不等於證明不存在 App Control；本次正向證據來自檔案存取與 SDDL。**
+
+重新讀取 manifest，正常公開啟動入口仍是 `OpenAI.Codex_2p2nqsd0c76g0!App` → `app/ChatGPT.exe`；沒有宣告 runtime 的 AppExecutionAlias／獨立 Application。先前經正常 AUMID 啟動、現在仍存在的 app 確實帶 package identity；這與未封裝宿主直接執行 EXE 是不同入口。
+
+官方 `unified-computer-use/scripts/launch.mjs` 只從 `CUA_REPL_NODE_REPL_PATH` 取得絕對路徑，再 `spawn(executable, [], { env: ..., stdio: "inherit" })`。對 `app.asar` 中指定主程式 `.vite/build/main-DpnWwRdP.js` 的有界唯讀檢查，也看到 app 配置該 launcher 與官方 Node 路徑；沒有執行／解包官方程式碼、探測 IPC 或把這些內部設定當成公開外部授權契約。這些已查入口尚不能讓 Pi 直接取得官方 session；**未找到外部契約不等於第三方整合被禁止。**
+
+### 8.4 最小重現與下一步
+
+本輪臨時腳本與去除敏感輸出的結果保留在本機明確診斷目錄，不納入正式 repo：
+
+```powershell
+$d = Join-Path $env:TEMP 'codex-eperm-20260908'
+powershell.exe -NoProfile -File "$d\probe.ps1" -Mode baseline
+# 預期目前 exit 1；三個 runtime started=false，內層 NativeErrorCode=5。
+powershell.exe -NoProfile -File "$d\probe.ps1" -Mode controls
+# 預期 exit 0；只驗證程序建立，不用公開 Node 替代官方 runtime。
+powershell.exe -NoProfile -File "$d\access-probe.ps1"
+# 唯讀存取與 package identity 對比；詳見 8.2。
+
+$p = Get-AppxPackage OpenAI.Codex
+$f = Join-Path $p.InstallLocation 'app\resources\cua_node\bin\node_repl.exe'
+(Get-Acl -LiteralPath $f).Sddl  # 必須讀原始條件，不只看 Access 表格
+```
+
+完整 repro 腳本、命令與證據索引另交本次診斷 artifact；上述 temp 路徑只適用本次機器，不是套件新增診斷功能。未新增正式測試；未重跑 npm 安裝／build／suite，因本輪只診斷安裝元件與更新研究，不更動產品程式。
+
+**此階段交付：blocked（WindowsApps direct activation）。** 後續成功路徑見下一節；WindowsApps 執行限制本身未被修改。
+
+## 9. 成功接入與實作驗收（同日後續）
+
+使用者修正官方 app 的預設專案路徑並開啟新對話後，主代理獨立重試。WindowsApps 三個 EXE 仍錯誤 5，但官方 app 的實際執行中程序出現在另一個、由 app 自行部署的目錄：
+
+```text
+%LOCALAPPDATA%/OpenAI/Codex/bin/8e5b6932251c2c1c/codex.exe
+%LOCALAPPDATA%/OpenAI/Codex/runtimes/cua_node/b474a88d5d105afa/bin/node.exe
+%LOCALAPPDATA%/OpenAI/Codex/runtimes/cua_node/b474a88d5d105afa/bin/node_repl.exe
+```
+
+這些已部署執行檔的 Authenticode 為 Valid/OpenAI；`codex --version` 為 `codex-cli 0.153.4`，官方 Node 為 `v24.19.0`，REPL 的 `--help` 可正常執行。轉接器沒有自行複製 runtime，也沒有修改官方安裝檔、ACL 或套件身分。
+
+官方 app 生成的 `.codex/plugins/cache/openai-bundled/unified-computer-use/26.901.51231/.mcp.json` 同時提供實際 runtime 路徑及 `SKY_CUA_NATIVE_PIPE_DIRECTORY`。由官方 `@oai/sky` 連接這個 app 提供的端點，才是此版本可工作的 Windows 路徑；自行讓 REPL spawn helper 並非必要，也不是本次實作。
+
+### 9.1 正式路徑
+
+```text
+Pi computer_use 的既有可取消 code worker（或 MCP typed tools）
+  → WindowsSessionExecutor：序列化、保留官方 session
+  → app 自行部署且已驗簽的 codex app-server
+  → mcpServer/tool/call → 官方 node_repl / @oai/sky service
+  → 官方 app 生成的 native pipe → 官方 Windows Computer Use
+```
+
+- `windows-runtime.ts` 解析 app 生成的設定、限制在官方部署佈局、驗證 OpenAI Authenticode，並逐檔比對部署的 Sky package 與 app-bundled 原件。
+- `windows-session.ts` 只產生 method dispatch 所需的 JS，模型程式仍在既有獨立 worker 執行。不呼叫 `turn/start`；provider 停用，觀測到 model-turn 通知即拒絕。
+- `windows-job.ps1` 以 suspended creation → Job Object assignment → resume，清理 adapter 自有的程序樹；Pi 程序退出也會觸發清理。不終止使用者的官方 app。
+- 保留官方 Windows 13 個 window2 方法及 selector；macOS 原有十方法、簽章 Team ID 與操作契約保留。Pi 與 MCP 依平台選用 API。
+- 官方 elicitation 轉送給使用者；沒有 UI 時取消，不自動核准。沒有新增 app allowlist、動作風險分類器或替代引擎。
+- 截圖在 Pi 主程序保留，code worker 只收到 opaque handles 與官方 metadata。Windows 取消時保留已收到的輸出與方法歷史。
+- 新建的 adapter 私有目錄使用 Windows user-only DACL；這只保護 adapter 自己的新檔案，不修改官方 app 或既有使用者目錄的權限。
+
+### 9.2 真實驗收
+
+1. 官方 app-server 握手及 ephemeral thread 成功；官方 `sky` 回報 target `windows`。
+2. `sky.list_apps()` 成功返回 40 個 app；`sky.list_windows()` 可取得官方 Window。
+3. 官方 `launch_app` 以 `Microsoft.WindowsNotepad_8wekyb3d8bbwe!App` 開啟新未命名記事本；System32 路徑嘗試失敗，未以非官方控制引擎替代。
+4. 使用者確認空白文件及游標後，官方 `type_text` 輸入 `Pi official Windows Computer Use test`；官方 state/list_windows 回報標題 `*Pi official Windows Computer Use te - 記事本`。標題有截斷，**不是全文文字比對通過**；文件未儲存，未修改其他文件。
+5. 透過正式 Pi extension 的已註冊 `execute` 入口（測試外層提供 ExtensionAPI，內層使用真實 runtime），`list_windows` → `get_window_state` → `emitImage` 成功返回上述標題、1 張 JPEG（該次 base64 長度 34604），並執行 `agent_settled`／`session_shutdown` 清理。此驗收不需要啟動 Pi 的模型回合。
+6. 該記事本的官方 accessibility 回應為 null；圖片工具仍回報目前模型不支援圖片，因此不聲稱主代理已視覺檢查截圖全文。使用者另確認測試已有 Computer Use 能力。
+
+PoC 曾將一張官方截圖暫存於 repo 外供圖片工具嘗試驗收，已刪除；正式 Pi/MCP 路徑不將圖片寫入磁碟。早期誤跑 macOS 程序群測試留下的三個、經命令列與 PID 確認屬本次測試的子程序亦已清理。
+
+### 9.3 檢查與限制
+
+- `npm ci`、`npm run check`、`npm run check:pi`、`npm test`、`npm run build` 全部成功。
+- Windows 完整 suite：51 個 tests 通過、0 失敗、2 個 platform-only tests 略過；另 macOS process-group lifecycle suite 略過。macOS 真實桌面／程序群驗收仍需 macOS，沒有把略過項目當成通過。
+- 測試涵蓋原樣 selectors/additional arguments、結構化資料、圖片 handles、取消與先前輸出、並行請求保留同一 session、官方確認／headless 取消、model-turn 拒絕、無憑證 home、Job Object 子孫與 parent-exit 清理、打包後 consumer 安裝啟動，以及私有 text-spill DACL。
+- 這仍依賴 app 內附／實驗性 transport，不是 OpenAI 對第三方 SDK 穩定性的承諾。官方 app 必須保持運行；更新後可能需要開啟新對話以重新部署 runtime／端點。
+- `/computer-use-status` 的 runtimeVerified 表示檔案及設定驗證成功，不保證當下 native pipe 可連接。
+- 使用者要求後續不使用子代理；Standards／Spec 審查由主代理自行完成，核對正式 dispatch、平台分流、簽章與程序清理、權限轉送，以及上述驗收限制，未發現阻擋交付的可達回歸。不宣稱獨立雙代理審查；macOS live 驗證仍待該平台執行。

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -118,7 +119,7 @@ test("Pi registers and activates one composable Computer Use tool", async () => 
 	adapter(fakePi as any);
 	assert.deepEqual(commands, ["computer-use-status"]);
 	assert.deepEqual(tools.map((tool) => tool.name), ["computer_use"]);
-	assert.match(tools[0].description, /sky\.get_app_state/);
+	assert.match(tools[0].description, process.platform === "win32" ? /sky\.get_window_state/ : /sky\.get_app_state/);
 	assert.match(tools[0].description, /sky\.type_text/);
 	assert.deepEqual(tools[0].parameters.required, ["code"]);
 	assert.equal(handlers.has("agent_settled"), true);
@@ -398,7 +399,10 @@ test("Pi truncates aggregate text to a private spill file without spilling image
 	assert.ok(rendered.fullOutputPath);
 	try {
 		assert.equal(await readFile(rendered.fullOutputPath, "utf8"), original);
-		assert.equal((await stat(rendered.fullOutputPath)).mode & 0o777, 0o600);
+		if (process.platform === "win32") {
+			const script = `$ErrorActionPreference='Stop'; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $f='${rendered.fullOutputPath.replaceAll("'", "''")}'; $parent=Get-Acl -LiteralPath (Split-Path $f); if(-not $parent.AreAccessRulesProtected){throw 'Inherited directory ACL'}; $rules=(Get-Acl -LiteralPath $f).GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]); if(@($rules).Count -eq 0 -or @($rules | Where-Object {$_.IdentityReference -ne $sid}).Count -ne 0){throw 'Unexpected file access'}; 'private'`;
+			assert.equal(execFileSync("powershell.exe", ["-NoProfile", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { encoding: "utf8" }).trim(), "private");
+		} else assert.equal((await stat(rendered.fullOutputPath)).mode & 0o777, 0o600);
 		assert.deepEqual(rendered.content.map((block) => block.type), ["text", "image", "text", "image"]);
 		assert.deepEqual(rendered.content[0], { type: "text", text: first });
 		assert.deepEqual(rendered.content[1], { type: "image", data: "first-image", mimeType: "image/png" });

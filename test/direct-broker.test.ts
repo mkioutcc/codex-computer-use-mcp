@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { describe } from "node:test";
 import { z } from "zod";
 import { buildDirectAppServerArgs, callOfficialDirectTool, createOfficialDirectToolSession, DirectBrokerCallError } from "../src/direct-broker.ts";
 import packageMetadata from "../package.json" with { type: "json" };
@@ -75,6 +75,8 @@ test("production app-server args disable model transport, plugins, and remote co
 	assert.doesNotMatch(serialized, /\bexec\b/);
 	assert.match(buildDirectAppServerArgs("/tmp/private-broker-work").join(" "), /cwd = "\/tmp\/private-broker-work"/);
 });
+
+describe("macOS process-group broker lifecycle", { skip: process.platform !== "darwin" }, () => {
 
 test("direct broker uses only zero-turn app-server MCP methods and an isolated credential-free CODEX_HOME", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "direct-broker-test."));
@@ -312,4 +314,5 @@ test("direct broker cancellation terminates the process group", async () => {
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		assert.throws(() => process.kill(pid, 0));
 	} finally { await rm(root, { recursive: true, force: true }); }
+});
 });

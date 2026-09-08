@@ -226,6 +226,10 @@ function normalizeBrokerError(error: Error, stderr: string): Error {
 
 export function buildDirectAppServerArgs(mcpCwd = COMPUTER_USE_PLUGIN_ROOT, clientPath = COMPUTER_USE_CLIENT_PATH): string[] {
 	const mcpTable = `{"computer-use" = { command = ${JSON.stringify(clientPath)}, args = ["mcp"], cwd = ${JSON.stringify(mcpCwd)}, enabled = true, startup_timeout_sec = 30, tool_timeout_sec = 120 }}`;
+	return buildZeroModelAppServerArgs(mcpTable);
+}
+
+export function buildZeroModelAppServerArgs(mcpTable: string): string[] {
 	const disabledProvider = '{ name = "Direct dispatch disabled provider", base_url = "http://127.0.0.1:9/v1", wire_api = "responses", request_max_retries = 0, stream_max_retries = 0, supports_websockets = false, requires_openai_auth = false }';
 	return [
 		"-c", 'model_provider="direct_disabled"',

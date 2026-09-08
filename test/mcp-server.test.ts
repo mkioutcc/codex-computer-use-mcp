@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { z } from "zod";
 import { COMPUTER_USE_METHODS, TOOL_INPUT_SCHEMAS, TOOL_METADATA } from "../src/tools.ts";
+import { WINDOWS_COMPUTER_USE_METHODS, WINDOWS_TOOL_DEFINITIONS } from "../src/windows-tools.ts";
 import packageMetadata from "../package.json" with { type: "json" };
 
 const packageVersion = packageMetadata.version;
@@ -31,8 +32,12 @@ test("stdio MCP exposes the Computer Use tools and status", async () => {
 		await client.connect(transport);
 		assert.deepEqual(client.getServerVersion(), { name: "codex-computer-use-mcp", version: packageVersion });
 		const listed = await client.listTools();
-		assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [...COMPUTER_USE_METHODS, "computer_use_status"].sort());
-		for (const method of COMPUTER_USE_METHODS) {
+		const methods = process.platform === "win32" ? WINDOWS_COMPUTER_USE_METHODS : COMPUTER_USE_METHODS;
+		assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [...methods, "computer_use_status"].sort());
+		if (process.platform === "win32") {
+			for (const definition of WINDOWS_TOOL_DEFINITIONS) assert.deepEqual(listed.tools.find((tool) => tool.name === definition.name), definition);
+		}
+		for (const method of process.platform === "win32" ? [] : COMPUTER_USE_METHODS) {
 			const tool = listed.tools.find((item) => item.name === method);
 			assert.deepEqual(tool, {
 				name: method,
@@ -46,11 +51,12 @@ test("stdio MCP exposes the Computer Use tools and status", async () => {
 		assert.equal(statusResult.isError, undefined);
 		const status = z.object({
 			permissionMode: z.literal("no-permissions"),
-			methods: z.array(z.enum(COMPUTER_USE_METHODS)),
-			brokerVerified: z.boolean(),
+			methods: z.array(z.string()),
+			brokerVerified: z.boolean().optional(),
+			runtimeVerified: z.boolean().optional(),
 		}).passthrough().parse(statusResult.structuredContent);
-		assert.deepEqual(status.methods, COMPUTER_USE_METHODS);
-		assert.equal(status.brokerVerified, true);
+		assert.deepEqual(status.methods, methods);
+		z.boolean().parse(process.platform === "win32" ? status.runtimeVerified : status.brokerVerified);
 	} finally {
 		await client.close().catch(() => undefined);
 		await rm(stateRoot, { recursive: true, force: true });

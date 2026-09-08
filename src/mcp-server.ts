@@ -19,11 +19,20 @@ import {
 	isDirectMethod,
 } from "./tools.ts";
 import { PACKAGE_VERSION } from "./version.ts";
+import { WindowsSessionExecutor } from "./windows-session.ts";
+import { WINDOWS_TOOL_DEFINITIONS, isWindowsMethod } from "./windows-tools.ts";
+import { getWindowsStatus } from "./windows-runtime.ts";
+import type { CodeSessionExecutor } from "./code-executor.ts";
+import { homedir } from "node:os";
+import path from "node:path";
+
+const windows = process.platform === "win32";
+const status = () => windows ? getWindowsStatus() : Promise.resolve(getDirectStatus());
 
 const cliArgs = process.argv.slice(2);
 if (cliArgs.length > 0) {
 	if (cliArgs.length === 1 && cliArgs[0] === "--status") {
-		console.log(JSON.stringify(getDirectStatus(), null, 2));
+		console.log(JSON.stringify(await status(), null, 2));
 		process.exit(0);
 	}
 	console.error("Usage: codex-computer-use-mcp [--status]");
@@ -34,12 +43,12 @@ const server = new Server(
 	{ name: "codex-computer-use-mcp", version: PACKAGE_VERSION },
 	{ capabilities: { tools: {} } },
 );
-const sessionExecutor = new DirectSessionExecutor({ idleTimeoutMs: 120_000 });
+const sessionExecutor: CodeSessionExecutor = windows ? new WindowsSessionExecutor() : new DirectSessionExecutor({ idleTimeoutMs: 120_000 });
 server.onclose = () => {
 	void sessionExecutor.close().catch(() => { process.exitCode = 1; });
 };
 
-const toolDefinitions = COMPUTER_USE_METHODS.map((method) => ({
+const toolDefinitions = windows ? WINDOWS_TOOL_DEFINITIONS : COMPUTER_USE_METHODS.map((method) => ({
 	name: method,
 	description: TOOL_METADATA[method].description,
 	inputSchema: TOOL_INPUT_SCHEMAS[method],
@@ -59,19 +68,25 @@ server.setRequestHandler(ListToolsRequestSchema, () => Promise.resolve({
 
 server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
 	if (request.params.name === statusToolDefinition.name) {
-		const status = getDirectStatus();
-		return { content: [{ type: "text", text: JSON.stringify(status, null, 2) }], structuredContent: status };
+		const currentStatus = await status();
+		return { content: [{ type: "text", text: JSON.stringify(currentStatus, null, 2) }], structuredContent: currentStatus };
 	}
-	if (!isDirectMethod(request.params.name)) {
+	const method = request.params.name;
+	const isMethod = windows ? isWindowsMethod : isDirectMethod;
+	if (!isMethod(method)) {
 		throw new McpError(ErrorCode.InvalidParams, `Unknown tool: ${request.params.name}`);
 	}
 
 	try {
 		const args = z.record(z.string(), z.json()).parse(request.params.arguments ?? {});
-		const response = await sessionExecutor.execute(request.params.name, args, {
+		const response = await sessionExecutor.execute(method, args, {
+			stateRoot: process.env.CODEX_COMPUTER_USE_HOME || path.join(homedir(), ".direct-computer-use"),
 			signal: extra.signal,
 			onElicitation: (elicitation) => forwardOfficialElicitationToMcpClient(server, elicitation, extra.signal),
 		});
+		if (windows && response.structuredContent !== undefined) {
+			response.content.unshift({ type: "text", text: JSON.stringify(response.structuredContent, null, 2) });
+		}
 		const result: CallToolResult = {
 			// SAFETY: app-server returns MCP CallToolResult content blocks; the broker already verifies the JSON object envelope.
 			content: response.content as CallToolResult["content"],

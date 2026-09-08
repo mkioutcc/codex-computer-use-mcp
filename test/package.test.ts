@@ -8,6 +8,10 @@ import test from "node:test";
 import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
+const npmCli = process.env.npm_execpath || path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+function runNpm(args: string[], cwd: string) {
+	return execFileAsync(process.platform === "win32" ? process.execPath : "npm", process.platform === "win32" ? [npmCli, ...args] : args, { cwd });
+}
 const packReportSchema = z.object({
 	filename: z.string(),
 	files: z.array(z.object({ path: z.string() })),
@@ -26,8 +30,8 @@ test("packed package installs and starts from a plain npm consumer", async () =>
 			recursive: true,
 			filter: (entry) => ![".git", "dist", "node_modules"].includes(path.relative(projectRoot, entry).split(path.sep)[0]),
 		});
-		await symlink(path.join(projectRoot, "node_modules"), path.join(sourceRoot, "node_modules"), "dir");
-		const { stdout } = await execFileAsync("npm", ["pack", "--json", "--pack-destination", root], { cwd: sourceRoot });
+		await symlink(path.join(projectRoot, "node_modules"), path.join(sourceRoot, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+		const { stdout } = await runNpm(["pack", "--json", "--pack-destination", root], sourceRoot);
 		const parsedReport = packOutputSchema.parse(JSON.parse(stdout));
 		const report = Array.isArray(parsedReport) ? parsedReport[0] : Object.values(parsedReport)[0];
 		assert.ok(report);
@@ -37,6 +41,8 @@ test("packed package installs and starts from a plain npm consumer", async () =>
 			"SECURITY.md",
 			"dist/mcp-server.js",
 			"dist/version.js",
+			"dist/windows-session.js",
+			"dist/windows-job.ps1",
 			"integrations/pi/index.ts",
 			"package.json",
 		]) assert.ok(files.includes(required), required);
@@ -47,7 +53,7 @@ test("packed package installs and starts from a plain npm consumer", async () =>
 		const consumer = path.join(root, "consumer");
 		await mkdir(consumer);
 		await writeFile(path.join(consumer, "package.json"), '{"private":true}\n');
-		await execFileAsync("npm", ["install", "--no-audit", "--no-fund", path.join(root, report.filename)], { cwd: consumer });
+		await runNpm(["install", "--no-audit", "--no-fund", path.join(root, report.filename)], consumer);
 
 		const installedRoot = path.join(consumer, "node_modules", "codex-computer-use-mcp");
 		const installedPackage = JSON.parse(await readFile(path.join(installedRoot, "package.json"), "utf8"));
@@ -59,6 +65,6 @@ test("packed package installs and starts from a plain npm consumer", async () =>
 		const status = await execFileAsync(process.execPath, [path.join(installedRoot, "dist", "mcp-server.js"), "--status"]);
 		assert.equal(JSON.parse(status.stdout).permissionMode, "no-permissions");
 	} finally {
-		await rm(root, { recursive: true, force: true });
+		await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 	}
 });

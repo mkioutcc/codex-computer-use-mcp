@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -29,7 +29,7 @@ test("audit is mode-0600 metadata without arguments, output, or secrets", async 
 	try {
 		await appendAudit(root, record);
 		const auditPath = path.join(root, "audit", "direct-computer-use.jsonl");
-		assert.equal((await stat(auditPath)).mode & 0o777, 0o600);
+		if (process.platform !== "win32") assert.equal((await stat(auditPath)).mode & 0o777, 0o600);
 		const parsed = JSON.parse((await readFile(auditPath, "utf8")).trim());
 		assert.equal(parsed.method, "type_text");
 		assert.equal(parsed.modelTurnsStarted, 0);
@@ -43,7 +43,19 @@ test("audit is mode-0600 metadata without arguments, output, or secrets", async 
 	}
 });
 
-test("audit refuses symlinked state and log targets", async () => {
+test("Windows audit refuses redirected state directories", { skip: process.platform !== "win32" }, async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "audit-junction-"));
+	try {
+		const outside = path.join(root, "outside");
+		await mkdir(outside);
+		await writeFile(path.join(outside, "untouched.txt"), "unchanged");
+		await symlink(outside, path.join(root, "redirected"), "junction");
+		await assert.rejects(appendAudit(path.join(root, "redirected"), record), /non-symlink/);
+		assert.equal(await readFile(path.join(outside, "untouched.txt"), "utf8"), "unchanged");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("audit refuses POSIX file symlinks for state and log targets", { skip: process.platform === "win32" }, async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "direct-audit-symlink-test."));
 	const outside = path.join(root, "outside.txt");
 	try {

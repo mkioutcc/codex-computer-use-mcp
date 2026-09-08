@@ -88,7 +88,7 @@ test("rejects a symlinked client layout rather than accepting an arbitrary resol
 		await makeClient(actualApp);
 		const expectedParent = path.join(root, ".codex", "computer-use");
 		await mkdir(expectedParent, { recursive: true });
-		await symlink(actualApp, path.join(expectedParent, "Codex Computer Use.app"));
+		await symlink(actualApp, path.join(expectedParent, "Codex Computer Use.app"), process.platform === "win32" ? "junction" : "dir");
 		assert.throws(
 			() => resolveOfficialComputerUseClient({ userHome: root, legacyPluginRoot: path.join(root, "legacy"), runSync: signedBy() }),
 			/was not canonical/,

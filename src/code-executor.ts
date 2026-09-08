@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
 import { z } from "zod";
-import type { DirectServiceDependencies } from "./direct-service.ts";
+import type { DirectResponse, DirectServiceDependencies } from "./direct-service.ts";
+import { WINDOWS_COMPUTER_USE_METHODS, type WindowsMethod } from "./windows-tools.ts";
 import { DirectSessionExecutor } from "./session-executor.ts";
 import {
 	COMPUTER_USE_METHODS,
@@ -17,9 +18,11 @@ const MAX_EMITTED_IMAGE_BYTES = 20 * 1024 * 1024;
 const CODE_SLICE_TIMEOUT_MS = 5_000;
 const WORKER_STARTUP_TIMEOUT_MS = 5_000;
 
+export type ComputerUseMethod = DirectMethod | WindowsMethod;
+
 export interface ComputerUseCodeResult {
 	content: JsonObject[];
-	calls: DirectMethod[];
+	calls: ComputerUseMethod[];
 	error?: string;
 }
 
@@ -31,7 +34,7 @@ interface ImageValue extends JsonObject {
 
 const workerMessageSchema = z.discriminatedUnion("type", [
 	z.object({ type: z.literal("ready") }),
-	z.object({ type: z.literal("call"), id: z.number().int(), method: z.enum(COMPUTER_USE_METHODS), args: z.string() }),
+	z.object({ type: z.literal("call"), id: z.number().int(), method: z.enum([...COMPUTER_USE_METHODS, ...WINDOWS_COMPUTER_USE_METHODS]), args: z.string() }),
 	z.object({ type: z.literal("emit"), value: z.string() }),
 	z.object({ type: z.literal("emit_image"), value: z.string() }),
 	z.object({ type: z.literal("done"), store: z.string(), error: z.string().optional() }),
@@ -45,17 +48,22 @@ const screenshotHandleSchema = z.object({
 	id: z.string(),
 });
 
-type CodeSessionExecutor = Pick<DirectSessionExecutor, "execute" | "close">;
+export interface CodeSessionExecutor {
+	execute(method: ComputerUseMethod, args: JsonObject, dependencies: DirectServiceDependencies): Promise<DirectResponse>;
+	close(): Promise<void>;
+}
 
 export class ComputerUseCodeExecutor {
 	private queue = Promise.resolve();
 	private readonly sessionExecutor: CodeSessionExecutor;
 	private readonly codeSliceTimeoutMs: number;
+	private readonly methods: readonly ComputerUseMethod[];
 	private readonly screenshots = new Map<string, ImageValue>();
 	private nextScreenshotId = 1;
 	readonly store: Record<string, JsonValue | undefined> = {};
 
-	constructor(sessionExecutor: CodeSessionExecutor = new DirectSessionExecutor(), codeSliceTimeoutMs = CODE_SLICE_TIMEOUT_MS) {
+	constructor(sessionExecutor: CodeSessionExecutor = new DirectSessionExecutor(), codeSliceTimeoutMs = CODE_SLICE_TIMEOUT_MS, methods: readonly ComputerUseMethod[] = COMPUTER_USE_METHODS) {
+		this.methods = methods;
 		this.sessionExecutor = sessionExecutor;
 		this.codeSliceTimeoutMs = codeSliceTimeoutMs;
 	}
@@ -82,12 +90,12 @@ export class ComputerUseCodeExecutor {
 			}
 			return new Promise<ComputerUseCodeResult>((resolve, reject) => {
 				const content: JsonObject[] = [];
-				const calls: DirectMethod[] = [];
+				const calls: ComputerUseMethod[] = [];
 				const worker = new Worker(
 					import.meta.url.endsWith(".ts")
 						? new URL("../dist/code-worker.js", import.meta.url)
 						: new URL("./code-worker.js", import.meta.url),
-					{ workerData: { code, store: this.store } },
+					{ workerData: { code, store: this.store, methods: this.methods } },
 				);
 				let emittedImages = 0;
 				let emittedImageBytes = 0;
@@ -123,7 +131,21 @@ export class ComputerUseCodeExecutor {
 					timer = setTimeout(() => stopWithError(`execution exceeded ${this.codeSliceTimeoutMs}ms between Computer Use calls`), this.codeSliceTimeoutMs);
 					timer.unref();
 				};
-				const abort = (): void => fail(new Error("Computer Use code cancelled"));
+				const abort = (): void => {
+					if (!this.methods.includes("get_window_state")) { fail(new Error("Computer Use code cancelled")); return; }
+					if (settled) return;
+					settled = true;
+					clearTimer();
+					dependencies.signal?.removeEventListener("abort", abort);
+					void worker.terminate();
+					void this.sessionExecutor.close().then(() => {
+						const error = "Computer Use code cancelled";
+						resolve({ content: [...content, { type: "text", text: error }], calls, error });
+					}, (cause) => {
+						const error = `Computer Use code cancelled; cleanup failed: ${cause instanceof Error ? cause.message : String(cause)}`;
+						resolve({ content: [...content, { type: "text", text: error }], calls, error });
+					});
+				};
 				if (dependencies.signal?.aborted) {
 					abort();
 					return;
@@ -197,6 +219,13 @@ export class ComputerUseCodeExecutor {
 									text,
 									screenshot: screenshot ? this.registerScreenshot(screenshot) : null,
 								};
+							} else if (message.method === "get_window_state") {
+								const state = z.object({ screenshots: z.array(argumentsSchema) }).catchall(z.json()).parse(value);
+								const images = response.content.filter((item) => item.type === "image");
+								value = { ...state, screenshots: state.screenshots.map((shot, index) => {
+									const image = images[index];
+									return { ...shot, url: image ? this.registerScreenshot({ type: "image", data: String(image.data), mimeType: String(image.mimeType) }) : null };
+								}) };
 							} else if (value === undefined) {
 								value = text || undefined;
 							}

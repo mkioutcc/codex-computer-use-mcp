@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -17,7 +17,11 @@ import {
   type DirectBrokerElicitationResponse,
 } from "../../dist/direct-broker.js";
 import { ComputerUseCodeExecutor } from "../../dist/code-executor.js";
+import { WindowsSessionExecutor } from "../../dist/windows-session.js";
+import { WINDOWS_COMPUTER_USE_METHODS } from "../../dist/windows-tools.js";
+import { getWindowsStatus, windowsPowerShell } from "../../dist/windows-runtime.js";
 import { type JsonObject } from "../../dist/tools.js";
+import { makePrivateDirectory } from "../../dist/private-directory.js";
 
 const jsonObjectSchema = z.record(z.string(), z.json());
 const codeParameters = {
@@ -57,6 +61,26 @@ emit(state.text);
 
 Batch known actions sequentially, then inspect again before deciding the next step.`;
 
+const windowsCodeDescription = `Compose the official Codex Windows Computer Use API. The official app must remain open with a working conversation. No nested model is used. Windows actions operate in the foreground.
+
+- sky.list_apps() -> [{ id, displayName?, windows: Window[] }]
+- sky.list_windows() -> Window[]
+- sky.get_window({ id, app? }) -> Window
+- sky.launch_app({ app })
+- sky.activate_window({ window })
+- sky.get_window_state({ window, include_screenshot?, include_text? }) -> { window, accessibility, screenshots }
+- sky.click({ window, element_index?, x?, y?, screenshotId?, mouse_button?, click_count? })
+- sky.perform_secondary_action({ window, element_index, action })
+- sky.set_value({ window, element_index, value })
+- sky.scroll({ window, x, y, scrollX, scrollY, screenshotId? })
+- sky.drag({ window, from_x, from_y, to_x, to_y, screenshotId? })
+- sky.press_key({ window, key })
+- sky.type_text({ window, text })
+
+Window is an unchanged official { app, id, title? } object; do not guess or rewrite it. Windows element_index is a number. Screenshots default to true, accessibility text to false; accessibility may be null even when requested. Screenshot metadata includes id, width/height and origin; its url is an opaque image handle in this adapter.
+Use emit(value) for text/JSON and emitImage(state.screenshots[0].url) for an image. Only emitted observations return to Pi. store is a persistent JSON object for returned windows and other state. A cancelled batch retains earlier emits and method history. Refresh state after actions before selecting new indexes or coordinates; do not reuse stale observations after failure. Official app approvals are forwarded, not bypassed. If the official service reports physical Escape or a user stop, stop issuing input; do not retry in a new session.
+Text is limited to 50KB/2000 lines (full text saved when truncated); images are returned directly, never spilled to disk.`;
+
 interface PiContentResult {
   content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
   fullOutputPath?: string;
@@ -74,7 +98,7 @@ export async function toPiContent(content: JsonObject[]): Promise<PiContentResul
     };
   }
 
-  const tempDir = await mkdtemp(path.join(tmpdir(), "pi-computer-use-"));
+  const tempDir = await makePrivateDirectory(path.join(tmpdir(), "pi-computer-use-"));
   const fullOutputPath = path.join(tempDir, "output.txt");
   await writeFile(fullOutputPath, fullText, { encoding: "utf8", mode: 0o600 });
   const suffix = `\n\n[Official Computer Use text truncated: showing ${aggregate.outputLines} of ${aggregate.totalLines} lines (${formatSize(aggregate.outputBytes)} of ${formatSize(aggregate.totalBytes)}). Full output saved to: ${fullOutputPath}]`;
@@ -162,22 +186,25 @@ export async function handleOfficialElicitation(
 
 export default function directComputerUse(pi: ExtensionAPI) {
   const stateRoot = process.env.CODEX_COMPUTER_USE_HOME || path.join(getAgentDir(), "direct-computer-use");
-  const codeExecutor = new ComputerUseCodeExecutor();
+  const windows = process.platform === "win32";
+  const codeExecutor = windows
+    ? new ComputerUseCodeExecutor(new WindowsSessionExecutor(), 5000, WINDOWS_COMPUTER_USE_METHODS)
+    : new ComputerUseCodeExecutor();
 
   pi.registerCommand("computer-use-status", {
     description: "Show Computer Use status",
     handler: async (_args, ctx) => {
-      ctx.ui.notify(JSON.stringify(getDirectStatus(stateRoot), null, 2), "info");
+      ctx.ui.notify(JSON.stringify(windows ? await getWindowsStatus() : getDirectStatus(stateRoot), null, 2), "info");
     },
   });
 
   pi.registerTool({
     name: "computer_use",
     label: "Computer Use",
-    description: codeDescription,
-    promptSnippet: "Run composable JavaScript against OpenAI's official signed macOS Computer Use surface",
+    description: windows ? windowsCodeDescription : codeDescription,
+    promptSnippet: `Run composable JavaScript against OpenAI's official signed ${windows ? "Windows" : "macOS"} Computer Use surface`,
     promptGuidelines: [
-      "Use computer_use for macOS app UI work, composing known sequential actions in one JavaScript call and emitting only the state needed for the next decision.",
+      `Use computer_use for ${windows ? "Windows" : "macOS"} app UI work, composing known sequential actions in one JavaScript call and emitting only the state needed for the next decision.`,
     ],
     // SAFETY: Pi accepts this standard JSON Schema object as a custom-tool parameter schema.
     parameters: codeParameters as any,
@@ -190,7 +217,9 @@ export default function directComputerUse(pi: ExtensionAPI) {
         onElicitation: (request) => handleOfficialElicitation(
           request,
           ctx,
-          async (url) => (await pi.exec("/usr/bin/open", ["--", url], { signal, timeout: 15_000 })).code === 0,
+          async (url) => windows
+            ? (await pi.exec(windowsPowerShell(), ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(`$ErrorActionPreference='Stop'; Start-Process -FilePath '${url.replaceAll("'", "''")}'`, "utf16le").toString("base64")], { signal, timeout: 15_000 })).code === 0
+            : (await pi.exec("/usr/bin/open", ["--", url], { signal, timeout: 15_000 })).code === 0,
         ),
       });
       const rendered = await toPiContent(result.content);
