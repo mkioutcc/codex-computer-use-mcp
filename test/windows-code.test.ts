@@ -17,6 +17,30 @@ test("Windows screenshots cross the code worker only as opaque handles with offi
 	} finally { await executor.close(); }
 });
 
+test("multiple screenshot regions preserve order, negative origins and logical coordinates", async () => {
+	const window = { app: "official-app", id: 42, title: "modal" };
+	const screenshots = [
+		{ id: "main", width: 1515, height: 859, originX: -1920, originY: 0, zIndex: 0 },
+		{ id: "popup", width: 500, height: 400, originX: -1600, originY: 100, zIndex: 1 },
+	];
+	const images = [{ type: "image", data: "main-pixels", mimeType: "image/png" }, { type: "image", data: "popup-pixels", mimeType: "image/jpeg" }];
+	const executor = new ComputerUseCodeExecutor({
+		async execute(method, args) {
+			if (method === "get_window_state") return { isError: false, content: images, structuredContent: { window, accessibility: null, screenshots } };
+			assert.equal(method, "click");
+			assert.deepEqual(args, { window, screenshotId: "popup", x: 20, y: 30 });
+			return { isError: false, content: [] };
+		},
+		async close() {},
+	}, 5000, WINDOWS_COMPUTER_USE_METHODS);
+	try {
+		const result = await executor.execute(`const s=await sky.get_window_state({window:${JSON.stringify(window)}}); emit(s.screenshots.map(({url,...metadata})=>metadata)); for(const shot of s.screenshots) emitImage(shot.url); await sky.click({window:s.window,screenshotId:s.screenshots[1].id,x:20,y:30});`, {});
+		assert.equal(result.error, undefined);
+		assert.deepEqual(JSON.parse(String(result.content[0].text)), screenshots);
+		assert.deepEqual(result.content.slice(1), images);
+	} finally { await executor.close(); }
+});
+
 test("Windows cancellation preserves earlier emits and history and closes the official session", async () => {
 	const controller = new AbortController();
 	let closed = false;

@@ -6,7 +6,11 @@ import type { JsonObject } from "./tools.ts";
 export async function probeWindowsConnection(session?: CodeSessionExecutor, signal?: AbortSignal): Promise<JsonObject> {
 	const started = performance.now();
 	const runtimeStatus: JsonObject = {};
-	const executor = session ?? new WindowsSessionExecutor({ onRuntimeStatus: (status) => Object.assign(runtimeStatus, status) });
+	const sessionTimingsMs: JsonObject = {};
+	const executor = session ?? new WindowsSessionExecutor({
+		onRuntimeStatus: (status) => Object.assign(runtimeStatus, status),
+		onTiming: (phase, durationMs) => { sessionTimingsMs[phase] = durationMs; },
+	});
 	let result: JsonObject;
 	try {
 		const response = await executor.execute("list_windows", {}, { signal });
@@ -18,5 +22,5 @@ export async function probeWindowsConnection(session?: CodeSessionExecutor, sign
 	}
 	try { await executor.close(); }
 	catch (error) { result.connectionReady = false; result.cleanupError = error instanceof Error ? error.message : String(error); }
-	return { ...runtimeStatus, ...result };
+	return { ...runtimeStatus, ...result, sessionTimingsMs };
 }

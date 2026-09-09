@@ -23,12 +23,16 @@ const resultSchema = z.object({ content: z.array(objectSchema), isError: z.boole
 const messageSchema = z.object({ id: z.union([z.string(), z.number()]).optional(), method: z.string().optional(), params: z.json().optional(), result: z.json().optional(), error: z.object({ message: z.string() }).passthrough().optional() });
 const elicitationSchema = z.object({ mode: z.string().optional(), message: z.string().optional(), requestedSchema: z.json().optional(), url: z.string().optional(), elicitationId: z.string().optional(), _meta: z.json().optional() }).catchall(z.json());
 
+export type WindowsSessionPhase = "runtimeVerification" | "privateDirectory" | "initialize" | "threadStart" | "replSetup" | "firstCall" | "turnEnded" | "processCleanup";
+
 interface WindowsSessionOptions {
 	/** Test-only external protocol producer. Pi never supplies this override. */
 	testProcess?: { command: string; args: string[] };
 	timeoutMs?: number;
 	/** Metadata only, emitted by this connection's actual verification (including failure). */
 	onRuntimeStatus?: (status: JsonObject) => void;
+	/** Durations only: no selectors, arguments, screenshots or pipe identifiers. */
+	onTiming?: (phase: WindowsSessionPhase, durationMs: number) => void;
 }
 
 function tomlTable(values: Record<string, string>): string {
@@ -52,8 +56,11 @@ interface Connection {
 }
 
 async function connect(options: WindowsSessionOptions, dependencies: DirectServiceDependencies): Promise<Connection> {
+	let phaseStarted = performance.now();
+	const mark = (phase: WindowsSessionPhase): void => { const now = performance.now(); options.onTiming?.(phase, Math.round(now - phaseStarted)); phaseStarted = now; };
 	dependencies.signal?.throwIfAborted();
 	const inspection = options.testProcess ? undefined : await inspectWindowsRuntime();
+	mark("runtimeVerification");
 	if (inspection) options.onRuntimeStatus?.(inspection.status);
 	const runtime = inspection?.runtime;
 	if (inspection && !runtime) throw new Error(String(inspection.status.error));
@@ -61,6 +68,7 @@ async function connect(options: WindowsSessionOptions, dependencies: DirectServi
 	const stateParent = runtime ? path.join(runtime.localAppData, "codex-computer-use-mcp", "sessions") : tmpdir();
 	await mkdir(stateParent, { recursive: true });
 	const root = await makePrivateDirectory(path.join(stateParent, "pi-windows-cu-"));
+	mark("privateDirectory");
 	const env: NodeJS.ProcessEnv = {};
 	for (const key of ["SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "LOCALAPPDATA", "APPDATA", "USERPROFILE"]) {
 		if (process.env[key]) env[key] = process.env[key];
@@ -156,11 +164,14 @@ async function connect(options: WindowsSessionOptions, dependencies: DirectServi
 		setElicitation(handler) { elicitation = handler; },
 		close() {
 			closing ??= (async () => {
+				const endingStarted = performance.now();
 				if (!fatal && connection.threadId) {
 					try {
 						await request("mcpServer/tool/call", { threadId: connection.threadId, server: "node_repl", tool: "turn_ended", arguments: { hook_event_name: "Stop", session_id: connection.threadId, turn_id: connection.threadId } }, 2000);
 					} catch { /* A stopped runtime is still terminated through its job. */ }
 				}
+				const cleanupStarted = performance.now();
+				options.onTiming?.("turnEnded", Math.round(cleanupStarted - endingStarted));
 				const failure = fatal;
 				stop(new Error("Official Windows session closed"));
 				let timer: NodeJS.Timeout | undefined;
@@ -168,6 +179,7 @@ async function connect(options: WindowsSessionOptions, dependencies: DirectServi
 					await Promise.race([closed, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Official Windows job did not close")), 10_000); })]);
 				} finally { clearTimeout(timer); }
 				await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+				options.onTiming?.("processCleanup", Math.round(performance.now() - cleanupStarted));
 				if (failure && !(failure instanceof WindowsSessionCancelled)) throw failure;
 			})();
 			return closing;
@@ -178,10 +190,13 @@ async function connect(options: WindowsSessionOptions, dependencies: DirectServi
 	try {
 		dependencies.signal?.throwIfAborted();
 		await request("initialize", { clientInfo: { name: "pi_windows_computer_use", version: PACKAGE_VERSION }, capabilities: { mcpServerOpenaiFormElicitation: dependencies.supportsOpenAiFormElicitation === true } }, 30_000);
+		mark("initialize");
 		send({ method: "initialized" });
 		const started = z.object({ thread: z.object({ id: z.string() }) }).parse(await request("thread/start", { cwd: root, approvalPolicy: "never", sandbox: "danger-full-access", ephemeral: true }, 30_000));
+		mark("threadStart");
 		connection.threadId = started.thread.id;
 		const boot = resultSchema.parse(await request("mcpServer/tool/call", { threadId: connection.threadId, server: "node_repl", tool: "js", arguments: { code: 'var sky = (await import("@oai/sky")).sky;' } }));
+		mark("replSetup");
 		if (boot.isError) throw new Error(boot.content.map((block) => String(block.text ?? "")).join("\n"));
 		return connection;
 	} catch (error) {
@@ -214,6 +229,7 @@ export class WindowsSessionExecutor implements CodeSessionExecutor {
 		const officialMethod = z.enum(WINDOWS_COMPUTER_USE_METHODS).parse(method);
 		const validatedArgs = WINDOWS_TOOL_SCHEMAS[officialMethod].parse(args);
 		dependencies.signal?.throwIfAborted();
+		const firstCall = !this.connection;
 		if (!this.connection) {
 			this.opening = connect(this.options, dependencies);
 			try { this.connection = await this.opening; }
@@ -232,7 +248,9 @@ export class WindowsSessionExecutor implements CodeSessionExecutor {
 			dependencies.signal?.throwIfAborted();
 			const marker = `pi-result-${randomUUID()}:`;
 			const code = `{ const value = await sky[${JSON.stringify(officialMethod)}](${JSON.stringify(validatedArgs)}); ${officialMethod === "get_window_state" ? 'for (const shot of value.screenshots) delete shot.url;' : ""} nodeRepl.write(${JSON.stringify(marker)} + JSON.stringify(value ?? null)); }`;
+			const callStarted = performance.now();
 			const raw = resultSchema.parse(await connection.request("mcpServer/tool/call", { threadId: connection.threadId, server: "node_repl", tool: "js", arguments: { code } }));
+			if (firstCall) this.options.onTiming?.("firstCall", Math.round(performance.now() - callStarted));
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			connection.assertHealthy();
 			if (raw.isError) {

@@ -41,8 +41,9 @@ readline.createInterface({input:process.stdin}).on('line',async line=>{
  }
 });
 `);
-	const session = new WindowsSessionExecutor({ testProcess: { command: process.execPath, args: [script, mode] }, timeoutMs: 1000 });
-	return { session, root, script, async cleanup() { await session.close(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } };
+	const timings: Array<{ phase: string; durationMs: number }> = [];
+	const session = new WindowsSessionExecutor({ testProcess: { command: process.execPath, args: [script, mode] }, timeoutMs: 1000, onTiming: (phase, durationMs) => timings.push({ phase, durationMs }) });
+	return { session, root, script, timings, async cleanup() { await session.close(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } };
 }
 
 test("Windows official session executes methods without a model turn and retains state", async () => {
@@ -57,6 +58,16 @@ test("Windows official session executes methods without a model turn and retains
 		assert.doesNotMatch(audit, /must-not-be-logged|fixture-thread|notepad/);
 		assert.equal(JSON.parse(audit.trim()).modelTurnsStarted, 0);
 	} finally { await f.cleanup(); }
+});
+
+test("Windows startup timings separate handshake, first call and cleanup without repeated warm setup", async () => {
+	const f = await fixture();
+	try {
+		await f.session.execute("list_apps", {}, {});
+		await f.session.execute("list_apps", {}, {});
+	} finally { await f.cleanup(); }
+	assert.deepEqual(f.timings.map(t => t.phase), ["runtimeVerification", "privateDirectory", "initialize", "threadStart", "replSetup", "firstCall", "turnEnded", "processCleanup"]);
+	for (const timing of f.timings) assert.ok(Number.isFinite(timing.durationMs) && timing.durationMs >= 0);
 });
 
 test("Windows official transport uses an isolated credential-free home", async () => {

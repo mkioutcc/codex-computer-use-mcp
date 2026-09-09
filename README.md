@@ -72,6 +72,7 @@ const state = await sky.get_window_state({
   include_screenshot: true,
   include_text: true,
 });
+store.window = state.window; // Keep the refreshed official selector unchanged.
 emit(state.accessibility); // May be null; inspect the screenshot instead.
 for (const screenshot of state.screenshots) emitImage(screenshot.url);
 ```
@@ -128,11 +129,11 @@ Pi limits returned text to 50KB or 2,000 lines. When text exceeds that limit, th
 
 - `/computer-use-status` verifies runtime files/configuration only. `connectionReady: null` means no live probe was attempted.
 - `/computer-use-status --probe`, CLI `node dist/mcp-server.js --probe`, or MCP `computer_use_status({probe:true})` also open the production transport and call `list_windows`, then close the diagnostic session. The result includes only reachability, count and timing, never window titles. CLI probe exits nonzero on failure. Probe status comes from that connection's own verification, not a separate preflight: one verification per new connection, with no cached trust. `probeMs` includes verification and the first call; `verificationMs` is a subset, not an additional cost. Cleanup completes before the probe returns.
-- Status includes package version, loaded runtime source/implementation fingerprint, broker/plugin versions and verification phase timings. The fingerprint identifies loaded resolver code, not the whole package or an integrity certificate. If a rebuild/reload still shows old behavior, fully exit Pi and start again.
+- Status includes package version, loaded runtime source/implementation fingerprint, broker/plugin versions and verification phase timings. `powerShellTimingsMs` separates discovery/signature work inside the combined process; those values are subsets of `timingsMs.discoveryAndAuthenticode`, not additional time. Live probes also report `sessionTimingsMs`: verification, private directory, launcher/initialize, thread start, REPL setup, first call and cleanup. The fingerprint identifies loaded resolver code, not the whole package or an integrity certificate. If a rebuild/reload still shows old behavior, fully exit Pi and start again.
 - Pi's native `tool_result` middleware marks stopped batches as errors while retaining earlier observations/images. Wrappers that invoke `execute` directly without Pi result middleware must inspect `details.ok` and `details.error`.
 - PowerShell runtime errors are rendered as bounded UTF-8 messages rather than Base64 command dumps.
 
-Windows `sky.target` is `"windows"`. `store` accepts JSON, not persistent Node objects. On the tested official build, text-only accessibility followed by element clicks can report missing coordinate geometry. Request a fresh screenshot-backed state before clicking; refresh again after an error rather than blindly replaying input. After an action the accessibility snapshot can lag the updated window title: reobserve before typing, verify the editable focus, and check actual document text rather than title alone. These are caller instructions, not selector rewriting or action gates.
+Windows `sky.target` is `"windows"`. `store` accepts JSON, not persistent Node objects. On the tested official build, text-only accessibility followed by element clicks can report missing coordinate geometry. Request a fresh screenshot-backed state before clicking; refresh again after an error rather than blindly replaying input. After an action the accessibility snapshot can lag the updated window title: reobserve before typing, verify the editable focus, and check actual document text rather than title alone. Duplicate accessibility lines with the same `element_index` represent one target, not two; different matching indexes remain ambiguous. When relevant indexes change between observations, reobserve until they settle instead of retaining an older index. An owned dialog may appear inside the owner's accessibility tree and additional screenshots rather than in `list_windows`; never invent another Window ID. Inspect all screenshots. If foreground capture shows the wrong app, explicitly activate the returned target, then observe again. A locked/black desktop or activation failure requires restoring the interactive desktop, not another input engine. These are caller instructions, not selector rewriting or action gates.
 
 The runtime compares all deployed Sky files on every new connection with eight bounded readers. Authenticode is still checked each time; there is no cached trust. Benchmark just the comparison, with alternating serial/bounded order:
 
@@ -140,6 +141,16 @@ The runtime compares all deployed Sky files on every new connection with eight b
 node tools/windows-benchmark.mjs "<app resources>/cua_node/bin/node_modules/@oai/sky"
 npm run check:windows:contract -- "<app resources>/plugins/openai-bundled/plugins/computer-use/docs/api.md"
 ```
+
+App discovery and the five Authenticode checks share one PowerShell process. Every new connection still checks all signatures, canonical/deployment paths and every Sky file before executing the verified broker. To measure ordinary startup versus warm calls, or isolate one versus two verification processes (alternating order, read-only):
+
+```powershell
+npm run build
+node tools/windows-startup-benchmark.mjs
+node tools/windows-verification-benchmark.mjs
+```
+
+These use fresh adapter sessions, not a cold OS disk cache. See [startup/stability measurements](docs/research/windows-startup-and-observation-validation.md).
 
 For an alternating comparison of the previous double-verification flow and the current probe (fresh connections, no desktop input), run `node tools/windows-probe-benchmark.mjs` after building. This measures the diagnostic probe, not a speedup of every ordinary UI call.
 
@@ -149,9 +160,11 @@ True UI acceptance is **opt-in**, separate from `npm test`. Keep the official ap
 
 ```powershell
 npm run test:windows:live
+# Also open/observe/dismiss the Find dialog and verify owned-window screenshot mapping:
+node tools/windows-live.mjs --ui --dialog
 ```
 
-The test captures the registered Pi tool (no model call), uses the real official runtime, creates a **new unsaved tab**, confirms blank editable focus, types a unique marker, checks its full accessibility readback and actual image blocks, then closes adapter processes. Existing documents are not saved or edited; the new test tab is left unsaved for inspection. An official refusal/user-input interruption fails the test rather than replaying inputs. The capture harness is not proof that a separately running Pi process has reloaded new code. Other apps, languages, multi-monitor/DPI, drag and physical Escape remain separate acceptance cases.
+The test captures the registered Pi tool (no model call), uses the real official runtime, creates a **new unsaved tab**, confirms blank editable focus, types a unique marker, checks its full accessibility readback and actual image blocks, then closes adapter processes. Existing documents are not saved or edited; the new test tab is left unsaved for inspection. The optional dialog case dismisses Find with Escape; it does not retry an ineffective close-button click. Observation helpers are test-only: bounded snapshot waits, same-index deduplication, and two stable relevant indexes before selecting a control. An official refusal/user-input interruption fails the test rather than replaying inputs. The capture harness is not proof that a separately running Pi process has reloaded new code. Other apps, languages, multi-monitor/DPI, drag and physical Escape remain separate acceptance cases.
 
 ## Development
 
