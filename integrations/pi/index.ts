@@ -20,6 +20,7 @@ import { ComputerUseCodeExecutor } from "../../dist/code-executor.js";
 import { WindowsSessionExecutor } from "../../dist/windows-session.js";
 import { WINDOWS_COMPUTER_USE_METHODS } from "../../dist/windows-tools.js";
 import { getWindowsStatus, windowsPowerShell } from "../../dist/windows-runtime.js";
+import { probeWindowsConnection } from "../../dist/windows-diagnostics.js";
 import { type JsonObject } from "../../dist/tools.js";
 import { makePrivateDirectory } from "../../dist/private-directory.js";
 
@@ -77,7 +78,7 @@ const windowsCodeDescription = `Compose the official Codex Windows Computer Use 
 - sky.press_key({ window, key })
 - sky.type_text({ window, text })
 
-Window is an unchanged official { app, id, title? } object; do not guess or rewrite it. Windows element_index is a number. Screenshots default to true, accessibility text to false; accessibility may be null even when requested. Screenshot metadata includes id, width/height and origin; its url is an opaque image handle in this adapter.
+Window is an unchanged official { app, id, title? } object; do not guess or rewrite it. Windows element_index is a number. Screenshots default to true, accessibility text to false; accessibility may be null even when requested. Screenshot metadata includes id, width/height and origin; its url is an opaque image handle in this adapter. sky.target is "windows". On this official build, element clicks may require screenshot-backed geometry: observe with include_screenshot:true before clicking; after a geometry error reobserve, never blindly replay input. Use the refreshed state.window. Global variables do not persist across batches; use JSON store.
 Use emit(value) for text/JSON and emitImage(state.screenshots[0].url) for an image. Only emitted observations return to Pi. store is a persistent JSON object for returned windows and other state. A cancelled batch retains earlier emits and method history. Refresh state after actions before selecting new indexes or coordinates; do not reuse stale observations after failure. Official app approvals are forwarded, not bypassed. If the official service reports physical Escape or a user stop, stop issuing input; do not retry in a new session.
 Text is limited to 50KB/2000 lines (full text saved when truncated); images are returned directly, never spilled to disk.`;
 
@@ -193,8 +194,10 @@ export default function directComputerUse(pi: ExtensionAPI) {
 
   pi.registerCommand("computer-use-status", {
     description: "Show Computer Use status",
-    handler: async (_args, ctx) => {
-      ctx.ui.notify(JSON.stringify(windows ? await getWindowsStatus() : getDirectStatus(stateRoot), null, 2), "info");
+    handler: async (args, ctx) => {
+      const result = windows ? await getWindowsStatus() : getDirectStatus(stateRoot);
+      if (args.trim() === "--probe" && windows && result.runtimeVerified === true) Object.assign(result, await probeWindowsConnection(undefined, ctx.signal));
+      ctx.ui.notify(JSON.stringify({ ...result, extensionSource: import.meta.url }, null, 2), result.connectionReady === false || result.runtimeVerified === false ? "error" : "info");
     },
   });
 
@@ -223,7 +226,7 @@ export default function directComputerUse(pi: ExtensionAPI) {
         ),
       });
       const rendered = await toPiContent(result.content);
-      const details: JsonObject = { calls: result.calls };
+      const details: JsonObject = { calls: result.calls, ok: !result.error };
       if (result.error) details.error = result.error;
       if (rendered.fullOutputPath) details.fullOutputPath = rendered.fullOutputPath;
       return { content: rendered.content, details };
@@ -238,6 +241,13 @@ export default function directComputerUse(pi: ExtensionAPI) {
     },
   });
 
+  // Pi's result middleware sets the error flag without discarding earlier images or observations.
+  pi.on("tool_result", (event) => {
+    const details = jsonObjectSchema.safeParse(event.details);
+    if (event.toolName === "computer_use" && details.success && details.data.ok === false) {
+      return { isError: true };
+    }
+  });
   pi.on("session_start", () => pi.setActiveTools([...new Set([...pi.getActiveTools(), "computer_use"])]));
   pi.on("agent_settled", () => codeExecutor.close());
   pi.on("session_shutdown", () => codeExecutor.close());

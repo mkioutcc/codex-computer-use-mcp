@@ -37,6 +37,8 @@
   "scripts": {
     "build": "node tools/build.mjs",
     "lint": "oxlint --deny-warnings",
+    "test:windows:live": "npm run build && node tools/windows-live.mjs --ui",
+    "check:windows:contract": "npm run build && node tools/windows-contract.mjs",
     "check": "npm run lint && tsc -p tsconfig.json --noEmit",
     "pretest": "npm run build",
     "test": "node --test test/*.test.ts",

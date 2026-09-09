@@ -128,6 +128,21 @@ test("Pi registers and activates one composable Computer Use tool", async () => 
 	assert.deepEqual([...active].sort(), ["computer_use", "read"]);
 });
 
+test("Pi result middleware marks a stopped batch as failed without dropping observations", async () => {
+	let tool: any;
+	const handlers = new Map<string, any>();
+	// SAFETY: this fixture implements only extension registration; the real worker executes the batch.
+	adapter({ registerTool(value: any) { tool = value; }, registerCommand() {}, on(name: string, handler: any) { handlers.set(name, handler); } } as any);
+	try {
+		const result = await tool.execute("partial", { code: 'emit("retained"); throw new Error("intentional failure");' }, undefined, undefined, { hasUI: false });
+		assert.equal(result.details.ok, false);
+		assert.equal(result.content[0].text, "retained");
+		const patch = handlers.get("tool_result")({ toolName: "computer_use", ...result, isError: false });
+		assert.deepEqual(patch, { isError: true });
+		assert.equal(result.content[0].text, "retained");
+		assert.equal(handlers.get("tool_result")({ toolName: "other", ...result }), undefined);
+	} finally { await handlers.get("session_shutdown")(); }
+});
 test("Computer Use code composes calls and emits only requested state", async () => {
 	const calls: Array<{ method: DirectMethod; args: DirectToolArguments }> = [];
 	const session = {

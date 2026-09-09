@@ -22,20 +22,27 @@ import { PACKAGE_VERSION } from "./version.ts";
 import { WindowsSessionExecutor } from "./windows-session.ts";
 import { WINDOWS_TOOL_DEFINITIONS, isWindowsMethod } from "./windows-tools.ts";
 import { getWindowsStatus } from "./windows-runtime.ts";
+import { probeWindowsConnection } from "./windows-diagnostics.ts";
 import type { CodeSessionExecutor } from "./code-executor.ts";
 import { homedir } from "node:os";
 import path from "node:path";
 
 const windows = process.platform === "win32";
-const status = () => windows ? getWindowsStatus() : Promise.resolve(getDirectStatus());
+const status = async (probe = false, signal?: AbortSignal) => {
+	const result = windows ? await getWindowsStatus() : getDirectStatus();
+	if (probe && windows && result.runtimeVerified === true) Object.assign(result, await probeWindowsConnection(undefined, signal));
+	return result;
+};
 
 const cliArgs = process.argv.slice(2);
 if (cliArgs.length > 0) {
-	if (cliArgs.length === 1 && cliArgs[0] === "--status") {
-		console.log(JSON.stringify(await status(), null, 2));
+	if (cliArgs.length === 1 && ["--status", "--probe"].includes(cliArgs[0])) {
+		const result = await status(cliArgs[0] === "--probe");
+		console.log(JSON.stringify(result, null, 2));
+		if (cliArgs[0] === "--probe" && result.connectionReady !== true) process.exit(1);
 		process.exit(0);
 	}
-	console.error("Usage: codex-computer-use-mcp [--status]");
+	console.error("Usage: codex-computer-use-mcp [--status|--probe]");
 	process.exit(1);
 }
 
@@ -58,7 +65,7 @@ const statusToolDefinition = {
 	name: "computer_use_status",
 	title: "Computer Use Status",
 	description: "Show Computer Use status.",
-	inputSchema: { type: "object" as const, properties: {}, additionalProperties: false },
+	inputSchema: { type: "object" as const, properties: { probe: { type: "boolean", description: "Run a live Windows connection probe (no desktop input)." } }, additionalProperties: false },
 	annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 };
 
@@ -68,8 +75,11 @@ server.setRequestHandler(ListToolsRequestSchema, () => Promise.resolve({
 
 server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
 	if (request.params.name === statusToolDefinition.name) {
-		const currentStatus = await status();
-		return { content: [{ type: "text", text: JSON.stringify(currentStatus, null, 2) }], structuredContent: currentStatus };
+		const { probe } = z.object({ probe: z.boolean().optional() }).parse(request.params.arguments ?? {});
+		const currentStatus = await status(probe, extra.signal);
+		const result: CallToolResult = { content: [{ type: "text", text: JSON.stringify(currentStatus, null, 2) }], structuredContent: currentStatus };
+		if (probe) result.isError = currentStatus.connectionReady !== true;
+		return result;
 	}
 	const method = request.params.name;
 	const isMethod = windows ? isWindowsMethod : isDirectMethod;

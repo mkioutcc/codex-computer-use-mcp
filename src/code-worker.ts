@@ -84,9 +84,9 @@ const bootstrap = new vm.Script(`(() => {
 	delete globalThis.__emitImageBridge;
 	delete globalThis.__storeJson;
 	const call = async (method, args = {}) => JSON.parse(await callBridge(method, JSON.stringify(args)));
-	globalThis.sky = Object.freeze(Object.fromEntries(
+	globalThis.sky = Object.freeze(Object.assign(Object.fromEntries(
 		${JSON.stringify(input.methods)}.map(method => [method, (args) => call(method, args)])
-	));
+	), ${JSON.stringify(input.methods.includes("get_window_state") ? { target: "windows" } : {})}));
 	globalThis.emit = (value) => emitBridge(JSON.stringify(value));
 	globalThis.emitImage = (value) => {
 		if (value === null) throw new Error("get_app_state returned no screenshot");

@@ -31,6 +31,15 @@ test("Windows cancellation preserves earlier emits and history and closes the of
 	assert.equal(closed, true);
 });
 
+test("Windows worker exposes official target without exposing extra callable methods", async () => {
+	const executor = new ComputerUseCodeExecutor({ async execute() { throw new Error("no call expected"); }, async close() {} }, 5000, WINDOWS_COMPUTER_USE_METHODS);
+	try {
+		const result = await executor.execute('emit(sky.target); emit(Object.keys(sky).filter(k=>typeof sky[k]==="function"));', {});
+		assert.equal(result.error, undefined);
+		assert.equal(result.content[0].text, "windows");
+		assert.deepEqual(JSON.parse(String(result.content[1].text)), [...WINDOWS_COMPUTER_USE_METHODS]);
+	} finally { await executor.close(); }
+});
 // The external official session boundary supplies JSON and image observations.
 test("Windows code keeps official window selectors and structured app inventory", async () => {
 	const window = { app: "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", id: 123, title: "Untitled" };
