@@ -11,7 +11,7 @@ import type { DirectResponse, DirectServiceDependencies } from "./direct-service
 import type { CodeSessionExecutor, ComputerUseMethod } from "./code-executor.ts";
 import type { JsonObject, JsonValue } from "./tools.ts";
 import { WINDOWS_COMPUTER_USE_METHODS, WINDOWS_TOOL_SCHEMAS } from "./windows-tools.ts";
-import { resolveWindowsRuntime, windowsPowerShell } from "./windows-runtime.ts";
+import { inspectWindowsRuntime, windowsPowerShell } from "./windows-runtime.ts";
 import { appendAudit } from "./audit.ts";
 import { PACKAGE_VERSION } from "./version.ts";
 import { makePrivateDirectory } from "./private-directory.ts";
@@ -27,6 +27,8 @@ interface WindowsSessionOptions {
 	/** Test-only external protocol producer. Pi never supplies this override. */
 	testProcess?: { command: string; args: string[] };
 	timeoutMs?: number;
+	/** Metadata only, emitted by this connection's actual verification (including failure). */
+	onRuntimeStatus?: (status: JsonObject) => void;
 }
 
 function tomlTable(values: Record<string, string>): string {
@@ -50,7 +52,11 @@ interface Connection {
 }
 
 async function connect(options: WindowsSessionOptions, dependencies: DirectServiceDependencies): Promise<Connection> {
-	const runtime = options.testProcess ? undefined : await resolveWindowsRuntime();
+	dependencies.signal?.throwIfAborted();
+	const inspection = options.testProcess ? undefined : await inspectWindowsRuntime();
+	if (inspection) options.onRuntimeStatus?.(inspection.status);
+	const runtime = inspection?.runtime;
+	if (inspection && !runtime) throw new Error(String(inspection.status.error));
 	dependencies.signal?.throwIfAborted();
 	const stateParent = runtime ? path.join(runtime.localAppData, "codex-computer-use-mcp", "sessions") : tmpdir();
 	await mkdir(stateParent, { recursive: true });

@@ -127,7 +127,7 @@ Pi limits returned text to 50KB or 2,000 lines. When text exceeds that limit, th
 ## Windows diagnostics and live acceptance
 
 - `/computer-use-status` verifies runtime files/configuration only. `connectionReady: null` means no live probe was attempted.
-- `/computer-use-status --probe`, CLI `node dist/mcp-server.js --probe`, or MCP `computer_use_status({probe:true})` also open the production transport and call `list_windows`, then close the diagnostic session. The result includes only reachability, count and timing, never window titles. CLI probe exits nonzero on failure.
+- `/computer-use-status --probe`, CLI `node dist/mcp-server.js --probe`, or MCP `computer_use_status({probe:true})` also open the production transport and call `list_windows`, then close the diagnostic session. The result includes only reachability, count and timing, never window titles. CLI probe exits nonzero on failure. Probe status comes from that connection's own verification, not a separate preflight: one verification per new connection, with no cached trust. `probeMs` includes verification and the first call; `verificationMs` is a subset, not an additional cost. Cleanup completes before the probe returns.
 - Status includes package version, loaded runtime source/implementation fingerprint, broker/plugin versions and verification phase timings. The fingerprint identifies loaded resolver code, not the whole package or an integrity certificate. If a rebuild/reload still shows old behavior, fully exit Pi and start again.
 - Pi's native `tool_result` middleware marks stopped batches as errors while retaining earlier observations/images. Wrappers that invoke `execute` directly without Pi result middleware must inspect `details.ok` and `details.error`.
 - PowerShell runtime errors are rendered as bounded UTF-8 messages rather than Base64 command dumps.
@@ -140,6 +140,8 @@ The runtime compares all deployed Sky files on every new connection with eight b
 node tools/windows-benchmark.mjs "<app resources>/cua_node/bin/node_modules/@oai/sky"
 npm run check:windows:contract -- "<app resources>/plugins/openai-bundled/plugins/computer-use/docs/api.md"
 ```
+
+For an alternating comparison of the previous double-verification flow and the current probe (fresh connections, no desktop input), run `node tools/windows-probe-benchmark.mjs` after building. This measures the diagnostic probe, not a speedup of every ordinary UI call.
 
 Contract checking compares official method names, argument field names and required/optional fields. It does not prove all UI behavior or every future type semantic.
 

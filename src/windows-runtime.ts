@@ -70,13 +70,18 @@ export async function verifySkyDirectory(installed: string, bundled: string): Pr
 }
 
 export async function getWindowsStatus(): Promise<JsonObject> {
+	return (await inspectWindowsRuntime()).status;
+}
+
+/** Resolve and report the same verification; no reusable trust cache or runtime override. */
+export async function inspectWindowsRuntime(): Promise<{ runtime?: WindowsRuntime; status: JsonObject }> {
 	const started = performance.now();
 	const identity = { adapterVersion: PACKAGE_VERSION, runtimeSource: import.meta.url, runtimeImplementation: createHash("sha256").update(resolveWindowsRuntime.toString() + powershell.toString() + verifySkyDirectory.toString()).digest("hex").slice(0, 16), connectionReady: null };
 	try {
 		const runtime = await resolveWindowsRuntime();
-		return { ...identity, verificationMs: Math.round(performance.now() - started), platform: "win32", permissionMode: "no-permissions", runtimeVerified: true, brokerVersion: runtime.brokerVersion, timingsMs: runtime.timingsMs, pluginVersion: runtime.version, appMustRemainOpen: true, methods: [...WINDOWS_COMPUTER_USE_METHODS] };
+		return { runtime, status: { ...identity, verificationMs: Math.round(performance.now() - started), platform: "win32", permissionMode: "no-permissions", runtimeVerified: true, brokerVersion: runtime.brokerVersion, timingsMs: runtime.timingsMs, pluginVersion: runtime.version, appMustRemainOpen: true, methods: [...WINDOWS_COMPUTER_USE_METHODS] } };
 	} catch (error) {
-		return { ...identity, verificationMs: Math.round(performance.now() - started), platform: "win32", permissionMode: "no-permissions", runtimeVerified: false, error: error instanceof Error ? error.message : String(error), methods: [...WINDOWS_COMPUTER_USE_METHODS] };
+		return { status: { ...identity, verificationMs: Math.round(performance.now() - started), platform: "win32", permissionMode: "no-permissions", runtimeVerified: false, error: error instanceof Error ? error.message : String(error), methods: [...WINDOWS_COMPUTER_USE_METHODS] } };
 	}
 }
 

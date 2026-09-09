@@ -29,9 +29,8 @@ import path from "node:path";
 
 const windows = process.platform === "win32";
 const status = async (probe = false, signal?: AbortSignal) => {
-	const result = windows ? await getWindowsStatus() : getDirectStatus();
-	if (probe && windows && result.runtimeVerified === true) Object.assign(result, await probeWindowsConnection(undefined, signal));
-	return result;
+	if (probe && windows) return probeWindowsConnection(undefined, signal);
+	return windows ? getWindowsStatus() : getDirectStatus();
 };
 
 const cliArgs = process.argv.slice(2);

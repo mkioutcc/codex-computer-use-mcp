@@ -195,8 +195,9 @@ export default function directComputerUse(pi: ExtensionAPI) {
   pi.registerCommand("computer-use-status", {
     description: "Show Computer Use status",
     handler: async (args, ctx) => {
-      const result = windows ? await getWindowsStatus() : getDirectStatus(stateRoot);
-      if (args.trim() === "--probe" && windows && result.runtimeVerified === true) Object.assign(result, await probeWindowsConnection(undefined, ctx.signal));
+      const result = windows
+        ? await (args.trim() === "--probe" ? probeWindowsConnection(undefined, ctx.signal) : getWindowsStatus())
+        : getDirectStatus(stateRoot);
       ctx.ui.notify(JSON.stringify({ ...result, extensionSource: import.meta.url }, null, 2), result.connectionReady === false || result.runtimeVerified === false ? "error" : "info");
     },
   });
