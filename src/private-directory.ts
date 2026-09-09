@@ -8,7 +8,7 @@ const execFileAsync = promisify(execFile);
 /** Applies only to newly created adapter-owned directories, never official app files or user directories. */
 export async function restrictWindowsDirectory(directory: string): Promise<void> {
 	if (process.platform !== "win32") return;
-	const script = `$ErrorActionPreference='Stop'; $acl=[Security.AccessControl.DirectorySecurity]::new(); $acl.SetAccessRuleProtection($true,$false); $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')); Set-Acl -LiteralPath '${directory.replaceAll("'", "''")}' -AclObject $acl`;
+	const script = `$ErrorActionPreference='Stop'; $env:PSModulePath=Join-Path $env:WINDIR 'System32\\WindowsPowerShell\\v1.0\\Modules'; Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; $acl=[Security.AccessControl.DirectorySecurity]::new(); $acl.SetAccessRuleProtection($true,$false); $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')); Set-Acl -LiteralPath '${directory.replaceAll("'", "''")}' -AclObject $acl`;
 	await execFileAsync(windowsPowerShell(), ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { timeout: 15_000, windowsHide: true });
 }
 

@@ -83,7 +83,7 @@ export async function resolveWindowsRuntime(): Promise<WindowsRuntime> {
 	const sky = path.join(moduleDir, "@oai", "sky");
 	const executables = [codex, node, repl, path.join(installation.resources, "..", "ChatGPT.exe"), path.join(sky, "bin", "windows", "codex-computer-use.exe")];
 	const quoted = executables.map((file) => `'${file.replaceAll("'", "''")}'`).join(",");
-	await powershell(`$ErrorActionPreference='Stop'; foreach($f in @(${quoted})){ $s=Get-AuthenticodeSignature -LiteralPath $f; if($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'CN="?OpenAI OpCo, LLC"?(,|$)'){throw 'Official Windows runtime signature verification failed'} }`);
+	await powershell(`$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $modulePath=Join-Path $env:WINDIR 'System32\\WindowsPowerShell\\v1.0\\Modules'; $env:PSModulePath=$modulePath; if(-not (Test-Path (Join-Path $modulePath 'Microsoft.PowerShell.Security'))){throw 'Windows PowerShell security module is missing'}; Import-Module (Join-Path $modulePath 'Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop; foreach($f in @(${quoted})){ $s=Get-AuthenticodeSignature -LiteralPath $f; if($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'CN="?OpenAI OpCo, LLC"?(,|$)'){throw 'Official Windows runtime signature verification failed'} }`);
 	await verifySkyDirectory(sky, path.join(installation.resources, "cua_node", "bin", "node_modules", "@oai", "sky"));
 	const { stdout } = await execFileAsync(codex, ["--version"], { timeout: 10_000, windowsHide: true });
 	const brokerVersion = stdout.trim();
